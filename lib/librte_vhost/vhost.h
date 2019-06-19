@@ -587,9 +587,13 @@ struct inflight_mem_info {
 	uint64_t	size;
 };
 
+/** The virtio-vhost-user PCI vhost-user protocol transport. */
+extern const struct vhost_transport_ops virtio_vhost_user_trans_ops;
+
 typedef enum VhostUserTransport {
 	VHOST_TRANSPORT_UNIX = 0,
-	VHOST_TRANSPORT_MAX = 1
+	VHOST_TRANSPORT_VVU = 1,
+	VHOST_TRANSPORT_MAX = 2
 } VhostUserTransport;
 
 /**
