@@ -88,7 +88,6 @@ struct virtqueue;
 #define VIRTIO_RING_F_INDIRECT_DESC	28
 
 #define VIRTIO_F_VERSION_1		32
-#define VIRTIO_F_IOMMU_PLATFORM	33
 
 /*
  * Some VirtIO feature bits (currently bits 28 through 31) are
