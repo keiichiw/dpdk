@@ -11,6 +11,7 @@
 #include <rte_log.h>
 
 #include "fd_man.h"
+#include "rte_common.h"
 #include "vhost.h"
 #include "vhost_user.h"
 
@@ -26,9 +27,9 @@ static struct fdset af_unix_fdset = {
 TAILQ_HEAD(vhost_user_connection_list, vhost_user_connection);
 
 struct vhost_user_connection {
+	struct virtio_net device; /* must be the first field! */
 	struct vhost_user_socket *vsocket;
 	int connfd;
-	int vid;
 
 	TAILQ_ENTRY(vhost_user_connection) next;
 };
@@ -155,62 +156,56 @@ vhost_user_add_connection(int fd, struct vhost_user_socket *vsocket)
 {
 	struct af_unix_socket *af_vsocket =
 		container_of(vsocket, struct af_unix_socket, socket);
-	int vid;
+	struct virtio_net *dev;
 	size_t size;
 	struct vhost_user_connection *conn;
 	int ret;
-	struct virtio_net *dev;
 
 	if (vsocket == NULL)
 		return;
 
-	conn = malloc(sizeof(*conn));
-	if (conn == NULL) {
-		close(fd);
+	dev = vhost_new_device(vsocket->trans_ops);
+	if (!dev) {
 		return;
 	}
 
-	vid = vhost_new_device(vsocket->trans_ops);
-	if (vid == -1) {
-		goto err;
-	}
+	conn = container_of(dev, struct vhost_user_connection, device);
+	conn->connfd = fd;
+	conn->vsocket = vsocket;
 
 	size = strnlen(vsocket->path, PATH_MAX);
-	vhost_set_ifname(vid, vsocket->path, size);
+	vhost_set_ifname(dev->vid, vsocket->path, size);
 
-	vhost_setup_virtio_net(vid, vsocket->use_builtin_virtio_net,
+	vhost_setup_virtio_net(dev->vid, vsocket->use_builtin_virtio_net,
 		vsocket->net_compliant_ol_flags);
 
-	vhost_attach_vdpa_device(vid, vsocket->vdpa_dev);
+	vhost_attach_vdpa_device(dev->vid, vsocket->vdpa_dev);
 
 	if (vsocket->extbuf)
-		vhost_enable_extbuf(vid);
+		vhost_enable_extbuf(dev->vid);
 
 	if (vsocket->linearbuf)
-		vhost_enable_linearbuf(vid);
+		vhost_enable_linearbuf(dev->vid);
 
 	if (vsocket->async_copy) {
-		dev = get_device(vid);
+		dev = get_device(dev->vid);
 
 		if (dev)
 			dev->async_copy = 1;
 	}
 
-	VHOST_LOG_CONFIG(INFO, "new device, handle is %d\n", vid);
+	VHOST_LOG_CONFIG(INFO, "new device, handle is %d\n", dev->vid);
 
 	if (vsocket->notify_ops->new_connection) {
-		ret = vsocket->notify_ops->new_connection(vid);
+		ret = vsocket->notify_ops->new_connection(dev->vid);
 		if (ret < 0) {
 			VHOST_LOG_CONFIG(ERR,
 				"failed to add vhost user connection with fd %d\n",
 				fd);
-			goto err_cleanup;
+			goto err;
 		}
 	}
 
-	conn->connfd = fd;
-	conn->vsocket = vsocket;
-	conn->vid = vid;
 	ret = fdset_add(&af_unix_fdset, fd, vhost_user_read_cb,
 			NULL, conn);
 	if (ret < 0) {
@@ -219,9 +214,9 @@ vhost_user_add_connection(int fd, struct vhost_user_socket *vsocket)
 			fd);
 
 		if (vsocket->notify_ops->destroy_connection)
-			vsocket->notify_ops->destroy_connection(conn->vid);
+			vsocket->notify_ops->destroy_connection(dev->vid);
 
-		goto err_cleanup;
+		goto err;
 	}
 
 	pthread_mutex_lock(&af_vsocket->conn_mutex);
@@ -231,11 +226,9 @@ vhost_user_add_connection(int fd, struct vhost_user_socket *vsocket)
 	fdset_pipe_notify(&af_unix_fdset);
 	return;
 
-err_cleanup:
-	vhost_destroy_device(vid);
 err:
-	free(conn);
-	close(fd);
+	close(conn->connfd);
+	vhost_destroy_device(dev->vid);
 }
 
 /* call back when there is new vhost-user connection from client  */
@@ -261,20 +254,13 @@ vhost_user_read_cb(int connfd, void *dat, int *remove)
 		container_of(vsocket, struct af_unix_socket, socket);
 	int ret;
 
-	ret = vhost_user_msg_handler(conn->vid, connfd);
+	ret = vhost_user_msg_handler(conn->device.vid, connfd);
 	if (ret < 0) {
-		struct virtio_net *dev = get_device(conn->vid);
-
 		close(connfd);
 		*remove = 1;
 
-		if (dev)
-			vhost_destroy_device_notify(dev);
-
 		if (vsocket->notify_ops->destroy_connection)
-			vsocket->notify_ops->destroy_connection(conn->vid);
-
-		vhost_destroy_device(conn->vid);
+			vsocket->notify_ops->destroy_connection(conn->device.vid);
 
 		if (vsocket->reconnect) {
 			create_unix_socket(vsocket);
@@ -285,7 +271,7 @@ vhost_user_read_cb(int connfd, void *dat, int *remove)
 		TAILQ_REMOVE(&af_vsocket->conn_list, conn, next);
 		pthread_mutex_unlock(&af_vsocket->conn_mutex);
 
-		free(conn);
+		vhost_destroy_device(conn->device.vid);
 	}
 }
 
@@ -607,9 +593,8 @@ again:
 		VHOST_LOG_CONFIG(INFO, "free connfd = %d for device '%s'\n",
 				 conn->connfd, vsocket->path);
 		close(conn->connfd);
-		vhost_destroy_device(conn->vid);
 		TAILQ_REMOVE(&af_vsocket->conn_list, conn, next);
-		free(conn);
+		vhost_destroy_device(conn->device.vid);
 	}
 	pthread_mutex_unlock(&af_vsocket->conn_mutex);
 
@@ -657,6 +642,7 @@ af_unix_vring_call(struct virtio_net *dev __rte_unused,
 
 const struct vhost_transport_ops af_unix_trans_ops = {
 	.socket_size = sizeof(struct af_unix_socket),
+	.device_size = sizeof(struct vhost_user_connection),
 	.socket_init = af_unix_socket_init,
 	.socket_cleanup = af_unix_socket_cleanup,
 	.socket_start = af_unix_socket_start,
