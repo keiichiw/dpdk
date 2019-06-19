@@ -35,6 +35,8 @@ cavium_zip = {'Class': '12', 'Vendor': '177d', 'Device': 'a037',
               'SVendor': None, 'SDevice': None}
 avp_vnic = {'Class': '05', 'Vendor': '1af4', 'Device': '1110',
             'SVendor': None, 'SDevice': None}
+virtio_vhost_user = {'Class': '00', 'Vendor': '1af4', 'Device': '1017,1058',
+                     'SVendor': None, 'SDevice': None}
 
 octeontx2_sso = {'Class': '08', 'Vendor': '177d', 'Device': 'a0f9,a0fa',
                  'SVendor': None, 'SDevice': None}
@@ -69,6 +71,7 @@ regex_devices = [octeontx2_ree]
 misc_devices = [intel_ioat_bdw, intel_ioat_skx, intel_ioat_icx, intel_idxd_spr,
                 intel_ntb_skx, intel_ntb_icx,
                 octeontx2_dma]
+other_devices = [virtio_vhost_user]
 
 # global dict ethernet devices present. Dictionary indexed by PCI address.
 # Each device within this is itself a dictionary of device properties
@@ -593,6 +596,8 @@ def pci_glob(arg):
             return paths
     return [arg]
 
+    if status_dev == 'other' or status_dev == 'all':
+        show_device_status(other_devices, "Other")
 
 def parse_args():
     '''Parses the command-line arguments given by the user and takes the
@@ -720,6 +725,7 @@ def do_arg_actions():
             get_device_details(compress_devices)
             get_device_details(regex_devices)
             get_device_details(misc_devices)
+            get_device_details(other_devices)
         show_status()
 
 
@@ -742,6 +748,7 @@ def main():
     get_device_details(compress_devices)
     get_device_details(regex_devices)
     get_device_details(misc_devices)
+    get_device_details(other_devices)
     do_arg_actions()
 
 if __name__ == "__main__":
