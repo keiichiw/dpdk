@@ -4,8 +4,17 @@
  * Copyright(c) 2019 Arrikto Inc.
  */
 
+#include <stdint.h>
 #include <sys/socket.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/types.h>
+#include <sys/ioctl.h>
+#include "rte_vhost.h"
+#ifdef RTE_LIBRTE_VHOST_POSTCOPY
+#include <linux/userfaultfd.h>
+#endif
 #include <fcntl.h>
 
 #include <rte_log.h>
@@ -44,7 +53,7 @@ struct af_unix_socket {
 	struct sockaddr_un un;
 };
 
-int read_vhost_message(int sockfd, struct VhostUserMsg *msg);
+static int read_vhost_message(int sockfd, struct VhostUserMsg *msg);
 static int create_unix_socket(struct vhost_user_socket *vsocket);
 static int vhost_user_start_server(struct vhost_user_socket *vsocket);
 static int vhost_user_start_client(struct vhost_user_socket *vsocket);
@@ -331,7 +340,7 @@ vhost_user_server_new_connection(int fd, void *dat, int *remove __rte_unused)
 }
 
 /* return bytes# of read on success or negative val on failure. */
-int
+static int
 read_vhost_message(int sockfd, struct VhostUserMsg *msg)
 {
 	int ret;
@@ -779,6 +788,340 @@ af_unix_vring_call(struct virtio_net *dev __rte_unused,
 	return 0;
 }
 
+static uint64_t
+get_blk_size(int fd)
+{
+	struct stat stat;
+	int ret;
+
+	ret = fstat(fd, &stat);
+	return ret == -1 ? (uint64_t)-1 : (uint64_t)stat.st_blksize;
+}
+
+#ifdef RTE_LIBRTE_VHOST_POSTCOPY
+static int
+af_unix_postcopy_region_register(struct virtio_net *dev,
+		struct rte_vhost_mem_region *reg)
+{
+	struct uffdio_register reg_struct;
+
+	/*
+	 * Let's register all the mmap'ed area to ensure
+	 * alignment on page boundary.
+	 */
+	reg_struct.range.start = (uint64_t)(uintptr_t)reg->mmap_addr;
+	reg_struct.range.len = reg->mmap_size;
+	reg_struct.mode = UFFDIO_REGISTER_MODE_MISSING;
+
+	if (ioctl(dev->postcopy_ufd, UFFDIO_REGISTER,
+				&reg_struct)) {
+		VHOST_LOG_CONFIG(ERR, "Failed to register ufd for region "
+				"%" PRIx64 " - %" PRIx64 " (ufd = %d) %s\n",
+				(uint64_t)reg_struct.range.start,
+				(uint64_t)reg_struct.range.start +
+				(uint64_t)reg_struct.range.len - 1,
+				dev->postcopy_ufd,
+				strerror(errno));
+		return -1;
+	}
+
+	VHOST_LOG_CONFIG(INFO, "\t userfaultfd registered for range : %" PRIx64 " - %" PRIx64 "\n",
+			(uint64_t)reg_struct.range.start,
+			(uint64_t)reg_struct.range.start +
+			(uint64_t)reg_struct.range.len - 1);
+
+	return 0;
+}
+#else
+static int
+af_unix_postcopy_region_register(struct virtio_net *dev __rte_unused,
+		struct rte_vhost_mem_region *reg __rte_unused)
+{
+	return -1;
+}
+#endif
+
+static int
+af_unix_postcopy_register(struct virtio_net *dev, int main_fd,
+		struct VhostUserMsg *msg)
+{
+	struct VhostUserMemory *memory;
+	struct rte_vhost_mem_region *reg;
+	VhostUserMsg ack_msg;
+	uint32_t i;
+
+	if (!dev->postcopy_listening)
+		return 0;
+
+	/*
+	 * We haven't a better way right now than sharing
+	 * DPDK's virtual address with Qemu, so that Qemu can
+	 * retrieve the region offset when handling userfaults.
+	 */
+	memory = &msg->payload.memory;
+	for (i = 0; i < memory->nregions; i++) {
+		reg = &dev->mem->regions[i];
+		memory->regions[i].userspace_addr = reg->host_user_addr;
+	}
+
+	/* Send the addresses back to qemu */
+	msg->fd_num = 0;
+	af_unix_send_reply(dev, msg);
+
+	/* Wait for qemu to acknolwedge it's got the addresses
+	 * we've got to wait before we're allowed to generate faults.
+	 */
+	if (read_vhost_message(main_fd, &ack_msg) <= 0) {
+		VHOST_LOG_CONFIG(ERR,
+				"Failed to read qemu ack on postcopy set-mem-table\n");
+		return -1;
+	}
+
+	if (validate_msg_fds(&ack_msg, 0) != 0)
+		return -1;
+
+	if (ack_msg.request.master != VHOST_USER_SET_MEM_TABLE) {
+		VHOST_LOG_CONFIG(ERR,
+				"Bad qemu ack on postcopy set-mem-table (%d)\n",
+				ack_msg.request.master);
+		return -1;
+	}
+
+	/* Now userfault register and we can use the memory */
+	for (i = 0; i < memory->nregions; i++) {
+		reg = &dev->mem->regions[i];
+		if (af_unix_postcopy_region_register(dev, reg) < 0)
+			return -1;
+	}
+
+	return 0;
+}
+
+static int
+af_unix_add_one_guest_page(struct virtio_net *dev, uint64_t guest_phys_addr,
+		   uint64_t host_phys_addr, uint64_t size)
+{
+	struct guest_page *page, *last_page;
+	struct guest_page *old_pages;
+
+	if (dev->nr_guest_pages == dev->max_guest_pages) {
+		dev->max_guest_pages *= 2;
+		old_pages = dev->guest_pages;
+		dev->guest_pages = rte_realloc(dev->guest_pages,
+					dev->max_guest_pages * sizeof(*page),
+					RTE_CACHE_LINE_SIZE);
+		if (dev->guest_pages == NULL) {
+			VHOST_LOG_CONFIG(ERR, "cannot realloc guest_pages\n");
+			rte_free(old_pages);
+			return -1;
+		}
+	}
+
+	if (dev->nr_guest_pages > 0) {
+		last_page = &dev->guest_pages[dev->nr_guest_pages - 1];
+		/* merge if the two pages are continuous */
+		if (host_phys_addr == last_page->host_phys_addr +
+				      last_page->size) {
+			last_page->size += size;
+			return 0;
+		}
+	}
+
+	page = &dev->guest_pages[dev->nr_guest_pages++];
+	page->guest_phys_addr = guest_phys_addr;
+	page->host_phys_addr  = host_phys_addr;
+	page->size = size;
+
+	return 0;
+}
+
+static int
+af_unix_add_guest_pages(struct virtio_net *dev, struct rte_vhost_mem_region *reg,
+		uint64_t page_size)
+{
+	uint64_t reg_size = reg->size;
+	uint64_t host_user_addr  = reg->host_user_addr;
+	uint64_t guest_phys_addr = reg->guest_phys_addr;
+	uint64_t host_phys_addr;
+	uint64_t size;
+
+	host_phys_addr = rte_mem_virt2iova((void *)(uintptr_t)host_user_addr);
+	size = page_size - (guest_phys_addr & (page_size - 1));
+	size = RTE_MIN(size, reg_size);
+
+	if (af_unix_add_one_guest_page(dev, guest_phys_addr, host_phys_addr, size) < 0)
+		return -1;
+
+	host_user_addr  += size;
+	guest_phys_addr += size;
+	reg_size -= size;
+
+	while (reg_size > 0) {
+		size = RTE_MIN(reg_size, page_size);
+		host_phys_addr = rte_mem_virt2iova((void *)(uintptr_t)
+						  host_user_addr);
+		if (af_unix_add_one_guest_page(dev, guest_phys_addr, host_phys_addr,
+				size) < 0)
+			return -1;
+
+		host_user_addr  += size;
+		guest_phys_addr += size;
+		reg_size -= size;
+	}
+
+	/* sort guest page array if over binary search threshold */
+	if (dev->nr_guest_pages >= VHOST_BINARY_SEARCH_THRESH) {
+		qsort((void *)dev->guest_pages, dev->nr_guest_pages,
+			sizeof(struct guest_page), guest_page_addrcmp);
+	}
+
+	return 0;
+}
+
+static int
+af_unix_mmap_region(struct virtio_net *dev,
+		struct rte_vhost_mem_region *region,
+		uint64_t mmap_offset)
+{
+	void *mmap_addr;
+	uint64_t mmap_size;
+	uint64_t alignment;
+	int populate;
+
+	/* Check for memory_size + mmap_offset overflow */
+	if (mmap_offset >= -region->size) {
+		VHOST_LOG_CONFIG(ERR,
+				"mmap_offset (%#"PRIx64") and memory_size "
+				"(%#"PRIx64") overflow\n",
+				mmap_offset, region->size);
+		return -1;
+	}
+
+	mmap_size = region->size + mmap_offset;
+
+	/* mmap() without flag of MAP_ANONYMOUS, should be called with length
+	 * argument aligned with hugepagesz at older longterm version Linux,
+	 * like 2.6.32 and 3.2.72, or mmap() will fail with EINVAL.
+	 *
+	 * To avoid failure, make sure in caller to keep length aligned.
+	 */
+	alignment = get_blk_size(region->fd);
+	if (alignment == (uint64_t)-1) {
+		VHOST_LOG_CONFIG(ERR,
+				"couldn't get hugepage size through fstat\n");
+		return -1;
+	}
+	mmap_size = RTE_ALIGN_CEIL(mmap_size, alignment);
+	if (mmap_size == 0) {
+		/*
+		 * It could happen if initial mmap_size + alignment overflows
+		 * the sizeof uint64, which could happen if either mmap_size or
+		 * alignment value is wrong.
+		 *
+		 * mmap() kernel implementation would return an error, but
+		 * better catch it before and provide useful info in the logs.
+		 */
+		VHOST_LOG_CONFIG(ERR, "mmap size (0x%" PRIx64 ") "
+				"or alignment (0x%" PRIx64 ") is invalid\n",
+				region->size + mmap_offset, alignment);
+		return -1;
+	}
+
+	populate = dev->async_copy ? MAP_POPULATE : 0;
+	mmap_addr = mmap(NULL, mmap_size, PROT_READ | PROT_WRITE,
+			MAP_SHARED | populate, region->fd, 0);
+
+	if (mmap_addr == MAP_FAILED) {
+		VHOST_LOG_CONFIG(ERR, "mmap failed (%s).\n", strerror(errno));
+		return -1;
+	}
+
+	region->mmap_addr = mmap_addr;
+	region->mmap_size = mmap_size;
+	region->host_user_addr = (uint64_t)(uintptr_t)mmap_addr + mmap_offset;
+
+	if (dev->async_copy)
+		if (af_unix_add_guest_pages(dev, region, alignment) < 0) {
+			VHOST_LOG_CONFIG(ERR,
+					"adding guest pages to region failed.\n");
+			return -1;
+		}
+
+	VHOST_LOG_CONFIG(INFO,
+			"guest memory region size: 0x%" PRIx64 "\n"
+			"\t guest physical addr: 0x%" PRIx64 "\n"
+			"\t guest virtual  addr: 0x%" PRIx64 "\n"
+			"\t host  virtual  addr: 0x%" PRIx64 "\n"
+			"\t mmap addr : 0x%" PRIx64 "\n"
+			"\t mmap size : 0x%" PRIx64 "\n"
+			"\t mmap align: 0x%" PRIx64 "\n"
+			"\t mmap off  : 0x%" PRIx64 "\n",
+			region->size,
+			region->guest_phys_addr,
+			region->guest_user_addr,
+			region->host_user_addr,
+			(uint64_t)(uintptr_t)mmap_addr,
+			mmap_size,
+			alignment,
+			mmap_offset);
+
+	return 0;
+}
+
+static int
+af_unix_map_mem_regions(struct virtio_net *dev, struct VhostUserMsg *msg)
+{
+	uint32_t i;
+	struct VhostUserMemory *memory = &msg->payload.memory;
+	struct vhost_user_connection *conn =
+		container_of(dev, struct vhost_user_connection, device);
+
+	for (i = 0; i < memory->nregions; i++) {
+		struct rte_vhost_mem_region *reg = &dev->mem->regions[i];
+		uint64_t mmap_offset;
+
+		reg->guest_phys_addr = memory->regions[i].guest_phys_addr;
+		reg->guest_user_addr = memory->regions[i].userspace_addr;
+		reg->size = memory->regions[i].memory_size;
+		reg->fd = msg->fds[i];
+
+		/*
+		 * Assign invalid file descriptor value to avoid double
+		 * closing on error path.
+		 */
+		msg->fds[i] = -1;
+
+		mmap_offset = memory->regions[i].mmap_offset;
+
+		if (af_unix_mmap_region(dev, reg, mmap_offset) < 0) {
+			VHOST_LOG_CONFIG(ERR, "Failed to mmap region %u\n", i);
+			return -1;
+		}
+
+		dev->mem->nregions++;
+	}
+
+	if (af_unix_postcopy_register(dev, conn->connfd, msg) < 0)
+		return -1;
+
+	return 0;
+}
+
+static void
+af_unix_unmap_mem_regions(struct virtio_net *dev)
+{
+	uint32_t i;
+	struct rte_vhost_mem_region *reg;
+
+	for (i = 0; i < dev->mem->nregions; i++) {
+		reg = &dev->mem->regions[i];
+		if (reg->host_user_addr) {
+			munmap(reg->mmap_addr, reg->mmap_size);
+			close(reg->fd);
+		}
+	}
+}
+
 const struct vhost_transport_ops af_unix_trans_ops = {
 	.socket_size = sizeof(struct af_unix_socket),
 	.device_size = sizeof(struct vhost_user_connection),
@@ -791,4 +1134,6 @@ const struct vhost_transport_ops af_unix_trans_ops = {
 	.send_slave_req = af_unix_send_slave_req,
 	.process_slave_message_reply = af_unix_process_slave_message_reply,
 	.set_slave_req_fd = af_unix_set_slave_req_fd,
+	.map_mem_regions = af_unix_map_mem_regions,
+	.unmap_mem_regions = af_unix_unmap_mem_regions,
 };
