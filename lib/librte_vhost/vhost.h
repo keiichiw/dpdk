@@ -218,13 +218,10 @@ struct vhost_virtqueue {
 	uint16_t	async_threshold;
 } __rte_cache_aligned;
 
-/* The vhost_user, vhost_user_socket, vhost_user_connection, and reconnect
- * declarations are temporary measures for moving AF_UNIX code into
- * trans_af_unix.c.  They will be cleaned up as socket.c is untangled from
- * trans_af_unix.c.
+/* The vhost_user, vhost_user_socket, and reconnect declarations are temporary
+ * measures for moving AF_UNIX code into trans_af_unix.c.  They will be cleaned
+ * up as socket.c is untangled from trans_af_unix.c.
  */
-TAILQ_HEAD(vhost_user_connection_list, vhost_user_connection);
-
 /*
  * Every time rte_vhost_driver_register() is invoked, an associated
  * vhost_user_socket struct will be created.
@@ -235,8 +232,6 @@ TAILQ_HEAD(vhost_user_connection_list, vhost_user_connection);
  * struct.
  */
 struct vhost_user_socket {
-	struct vhost_user_connection_list conn_list;
-	pthread_mutex_t conn_mutex;
 	char *path;
 	bool is_server;
 	bool reconnect;
@@ -262,14 +257,6 @@ struct vhost_user_socket {
 
 	struct vhost_device_ops const *notify_ops;
 	struct vhost_transport_ops const *trans_ops;
-};
-
-struct vhost_user_connection {
-	struct vhost_user_socket *vsocket;
-	int connfd;
-	int vid;
-
-	TAILQ_ENTRY(vhost_user_connection) next;
 };
 
 #define MAX_VHOST_SOCKET 1024
