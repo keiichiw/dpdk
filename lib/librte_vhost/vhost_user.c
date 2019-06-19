@@ -31,6 +31,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <assert.h>
+#include "rte_vhost.h"
 #ifdef RTE_LIBRTE_VHOST_NUMA
 #include <numaif.h>
 #endif
@@ -190,11 +191,6 @@ vhost_backend_cleanup(struct virtio_net *dev)
 
 		free(dev->inflight_info);
 		dev->inflight_info = NULL;
-	}
-
-	if (dev->slave_req_fd >= 0) {
-		close(dev->slave_req_fd);
-		dev->slave_req_fd = -1;
 	}
 
 	if (dev->postcopy_ufd >= 0) {
@@ -2266,23 +2262,15 @@ static int
 vhost_user_set_req_fd(struct virtio_net **pdev, struct VhostUserMsg *msg,
 			int main_fd __rte_unused)
 {
+	int ret;
 	struct virtio_net *dev = *pdev;
-	int fd = msg->fds[0];
 
 	if (validate_msg_fds(msg, 1) != 0)
 		return RTE_VHOST_MSG_RESULT_ERR;
 
-	if (fd < 0) {
-		VHOST_LOG_CONFIG(ERR,
-				"Invalid file descriptor for slave channel (%d)\n",
-				fd);
+	ret = dev->trans_ops->set_slave_req_fd(dev, msg);
+	if (ret < 0)
 		return RTE_VHOST_MSG_RESULT_ERR;
-	}
-
-	if (dev->slave_req_fd >= 0)
-		close(dev->slave_req_fd);
-
-	dev->slave_req_fd = fd;
 
 	return RTE_VHOST_MSG_RESULT_OK;
 }
@@ -2613,21 +2601,6 @@ send_vhost_reply(struct virtio_net *dev, struct VhostUserMsg *msg)
 	return dev->trans_ops->send_reply(dev, msg);
 }
 
-static int
-send_vhost_slave_message(struct virtio_net *dev, struct VhostUserMsg *msg)
-{
-	int ret;
-
-	if (msg->flags & VHOST_USER_NEED_REPLY)
-		rte_spinlock_lock(&dev->slave_req_lock);
-
-	ret = dev->trans_ops->send_slave_req(dev, msg);
-	if (ret < 0 && (msg->flags & VHOST_USER_NEED_REPLY))
-		rte_spinlock_unlock(&dev->slave_req_lock);
-
-	return ret;
-}
-
 /*
  * Allocate a queue pair if it hasn't been allocated yet
  */
@@ -2921,43 +2894,6 @@ out:
 	return 0;
 }
 
-static int process_slave_message_reply(struct virtio_net *dev,
-				       const struct VhostUserMsg *msg)
-{
-	struct VhostUserMsg msg_reply;
-	int ret;
-
-	if ((msg->flags & VHOST_USER_NEED_REPLY) == 0)
-		return 0;
-
-	ret = read_vhost_message(dev->slave_req_fd, &msg_reply);
-	if (ret <= 0) {
-		if (ret < 0)
-			VHOST_LOG_CONFIG(ERR,
-				"vhost read slave message reply failed\n");
-		else
-			VHOST_LOG_CONFIG(INFO,
-				"vhost peer closed\n");
-		ret = -1;
-		goto out;
-	}
-
-	ret = 0;
-	if (msg_reply.request.slave != msg->request.slave) {
-		VHOST_LOG_CONFIG(ERR,
-			"Received unexpected msg type (%u), expected %u\n",
-			msg_reply.request.slave, msg->request.slave);
-		ret = -1;
-		goto out;
-	}
-
-	ret = msg_reply.payload.u64 ? -1 : 0;
-
-out:
-	rte_spinlock_unlock(&dev->slave_req_lock);
-	return ret;
-}
-
 int
 vhost_user_iotlb_miss(struct virtio_net *dev, uint64_t iova, uint8_t perm)
 {
@@ -2998,7 +2934,7 @@ vhost_user_slave_config_change(struct virtio_net *dev, bool need_reply)
 	if (need_reply)
 		msg.flags |= VHOST_USER_NEED_REPLY;
 
-	ret = send_vhost_slave_message(dev, &msg);
+	ret = dev->trans_ops->send_slave_req(dev, &msg);
 	if (ret < 0) {
 		VHOST_LOG_CONFIG(ERR,
 				"Failed to send config change (%d)\n",
@@ -3006,7 +2942,7 @@ vhost_user_slave_config_change(struct virtio_net *dev, bool need_reply)
 		return ret;
 	}
 
-	return process_slave_message_reply(dev, &msg);
+	return dev->trans_ops->process_slave_message_reply(dev, &msg);
 }
 
 int
@@ -3045,14 +2981,14 @@ static int vhost_user_slave_set_vring_host_notifier(struct virtio_net *dev,
 		msg.fd_num = 1;
 	}
 
-	ret = send_vhost_slave_message(dev, &msg);
+	ret = dev->trans_ops->send_slave_req(dev, &msg);
 	if (ret < 0) {
 		VHOST_LOG_CONFIG(ERR,
 			"Failed to set host notifier (%d)\n", ret);
 		return ret;
 	}
 
-	return process_slave_message_reply(dev, &msg);
+	return dev->trans_ops->process_slave_message_reply(dev, &msg);
 }
 
 int rte_vhost_host_notifier_ctrl(int vid, uint16_t qid, bool enable)
