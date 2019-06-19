@@ -688,7 +688,6 @@ vhost_new_device(const struct vhost_transport_ops *trans_ops)
 	dev->vid = i;
 	dev->flags = VIRTIO_DEV_BUILTIN_VIRTIO_NET;
 	dev->trans_ops = trans_ops;
-	dev->postcopy_ufd = -1;
 
 	return dev;
 }
