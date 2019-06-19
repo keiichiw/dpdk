@@ -76,4 +76,9 @@ EXPERIMENTAL {
 	rte_vhost_async_channel_unregister;
 	rte_vhost_submit_enqueue_burst;
 	rte_vhost_poll_enqueue_completed;
+	rte_vhost_register_transport;
+	vhost_destroy_device;
+	vhost_new_device;
+	vhost_set_ifname;
+	vhost_user_msg_handler;
 };
