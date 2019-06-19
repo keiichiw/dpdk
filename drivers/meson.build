@@ -16,6 +16,7 @@ subdirs = [
 	'vdpa',    # depends on common, bus and mempool.
 	'event',   # depends on common, bus, mempool and net.
 	'baseband', # depends on common and bus.
+	'virtio_vhost_user',
 ]
 
 disabled_drivers = run_command(list_dir_globs, get_option('disable_drivers'),
