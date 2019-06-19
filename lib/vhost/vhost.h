@@ -598,6 +598,26 @@ struct inflight_mem_info {
 	uint64_t	size;
 };
 
+typedef enum VhostUserTransport {
+	VHOST_TRANSPORT_UNIX = 0,
+	VHOST_TRANSPORT_MAX = 1
+} VhostUserTransport;
+
+/**
+ * Register a new vhost-user transport in the transport map.
+ *
+ * @param trans
+ *  the transport that is going to be registered
+ * @param trans_ops
+ *  the transport operations supported by this transport
+ * @return
+ *  0 on success, -1 on failure
+ * */
+__rte_experimental
+int
+rte_vhost_register_transport(VhostUserTransport trans,
+                const struct vhost_transport_ops *trans_ops);
+
 /**
  * Device structure contains all configuration information relating
  * to the device.
@@ -914,11 +934,11 @@ get_device(int vid)
 	return dev;
 }
 
-struct virtio_net *
-vhost_new_device(const struct vhost_transport_ops *trans_ops);
+__rte_experimental struct virtio_net *vhost_new_device(
+    const struct vhost_transport_ops *trans_ops);
 void cleanup_device(struct virtio_net *dev, int destroy);
 void reset_device(struct virtio_net *dev);
-void vhost_destroy_device(int);
+__rte_experimental void vhost_destroy_device(int);
 void vhost_destroy_device_notify(struct virtio_net *dev);
 
 void cleanup_vq(struct vhost_virtqueue *vq, int destroy);
@@ -929,8 +949,9 @@ int alloc_vring_queue(struct virtio_net *dev, uint32_t vring_idx);
 
 void vhost_attach_vdpa_device(int vid, struct rte_vdpa_device *dev);
 
-void vhost_set_ifname(int, const char *if_name, unsigned int if_len);
+__rte_experimental void vhost_set_ifname(int, const char *if_name, unsigned int if_len);
 void vhost_setup_virtio_net(int vid, bool enable, bool legacy_ol_flags);
+
 void vhost_enable_extbuf(int vid);
 void vhost_enable_linearbuf(int vid);
 int vhost_enable_guest_notification(struct virtio_net *dev,

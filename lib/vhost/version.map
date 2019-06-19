@@ -79,4 +79,9 @@ EXPERIMENTAL {
 
 	# added in 21.05
 	rte_vhost_get_negotiated_protocol_features;
+	rte_vhost_register_transport;
+	vhost_destroy_device;
+	vhost_new_device;
+	vhost_set_ifname;
+	vhost_user_msg_handler;
 };
