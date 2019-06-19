@@ -31,6 +31,7 @@ enum {VIRTIO_RXQ, VIRTIO_TXQ, VIRTIO_QNUM};
 #define ETH_VHOST_CLIENT_ARG		"client"
 #define ETH_VHOST_IOMMU_SUPPORT		"iommu-support"
 #define ETH_VHOST_POSTCOPY_SUPPORT	"postcopy-support"
+#define ETH_VHOST_VIRTIO_TRANSPORT	"virtio-transport"
 #define ETH_VHOST_VIRTIO_NET_F_HOST_TSO "tso"
 #define ETH_VHOST_LINEAR_BUF  "linear-buffer"
 #define ETH_VHOST_EXT_BUF  "ext-buffer"
@@ -42,6 +43,7 @@ static const char *valid_arguments[] = {
 	ETH_VHOST_CLIENT_ARG,
 	ETH_VHOST_IOMMU_SUPPORT,
 	ETH_VHOST_POSTCOPY_SUPPORT,
+	ETH_VHOST_VIRTIO_TRANSPORT,
 	ETH_VHOST_VIRTIO_NET_F_HOST_TSO,
 	ETH_VHOST_LINEAR_BUF,
 	ETH_VHOST_EXT_BUF,
@@ -1510,6 +1512,7 @@ rte_pmd_vhost_probe(struct rte_vdev_device *dev)
 	int client_mode = 0;
 	int iommu_support = 0;
 	int postcopy_support = 0;
+	uint16_t virtio_transport = 0;
 	int tso = 0;
 	int linear_buf = 0;
 	int ext_buf = 0;
@@ -1620,6 +1623,16 @@ rte_pmd_vhost_probe(struct rte_vdev_device *dev)
 
 		if (ext_buf == 1)
 			flags |= RTE_VHOST_USER_EXTBUF_SUPPORT;
+	}
+
+	if (rte_kvargs_count(kvlist, ETH_VHOST_VIRTIO_TRANSPORT) == 1) {
+		ret = rte_kvargs_process(kvlist, ETH_VHOST_VIRTIO_TRANSPORT,
+					 &open_int, &virtio_transport);
+		if (ret < 0)
+			goto out_free;
+
+		if (virtio_transport)
+			flags |= RTE_VHOST_USER_VIRTIO_TRANSPORT;
 	}
 
 	if (dev->device.numa_node == SOCKET_ID_ANY)
