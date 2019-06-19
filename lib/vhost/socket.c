@@ -336,13 +336,6 @@ rte_vhost_driver_register(const char *path, uint64_t flags)
 		vhost_user_socket_mem_free(vsocket);
 		goto out;
 	}
-	TAILQ_INIT(&vsocket->conn_list);
-	ret = pthread_mutex_init(&vsocket->conn_mutex, NULL);
-	if (ret) {
-		VHOST_LOG_CONFIG(ERR,
-			"error: failed to init connection mutex\n");
-		goto out_free;
-	}
 	vsocket->vdpa_dev = NULL;
 	vsocket->extbuf = flags & RTE_VHOST_USER_EXTBUF_SUPPORT;
 	vsocket->linearbuf = flags & RTE_VHOST_USER_LINEARBUF_SUPPORT;
@@ -355,7 +348,7 @@ rte_vhost_driver_register(const char *path, uint64_t flags)
 		VHOST_LOG_CONFIG(ERR, "error: enabling async copy and IOMMU "
 			"or post-copy feature simultaneously is not "
 			"supported\n");
-		goto out_mutex;
+		goto out_free;
 	}
 
 	/*
@@ -413,7 +406,7 @@ rte_vhost_driver_register(const char *path, uint64_t flags)
 		VHOST_LOG_CONFIG(ERR,
 			"Postcopy requested but not compiled\n");
 		ret = -1;
-		goto out_mutex;
+		goto out_free;
 #endif
 	}
 
@@ -421,14 +414,14 @@ rte_vhost_driver_register(const char *path, uint64_t flags)
 		vsocket->reconnect = !(flags & RTE_VHOST_USER_NO_RECONNECT);
 		if (vsocket->reconnect && reconn_tid == 0) {
 			if (vhost_user_reconnect_init() != 0)
-				goto out_mutex;
+				goto out_free;
 		}
 	} else {
 		vsocket->is_server = true;
 	}
 	ret = trans_ops->socket_init(vsocket, flags);
 	if (ret < 0) {
-		goto out_mutex;
+		goto out_free;
 	}
 
 	vhost_user.vsockets[vhost_user.vsocket_cnt++] = vsocket;
@@ -436,11 +429,6 @@ rte_vhost_driver_register(const char *path, uint64_t flags)
 	pthread_mutex_unlock(&vhost_user.mutex);
 	return ret;
 
-out_mutex:
-	if (pthread_mutex_destroy(&vsocket->conn_mutex)) {
-		VHOST_LOG_CONFIG(ERR,
-			"error: failed to destroy connection mutex\n");
-	}
 out_free:
 	vhost_user_socket_mem_free(vsocket);
 out:
@@ -457,52 +445,20 @@ rte_vhost_driver_unregister(const char *path)
 {
 	int i;
 	int count;
-	struct vhost_user_connection *conn, *next;
 
 	if (path == NULL)
 		return -1;
 
-again:
 	pthread_mutex_lock(&vhost_user.mutex);
 
 	for (i = 0; i < vhost_user.vsocket_cnt; i++) {
 		struct vhost_user_socket *vsocket = vhost_user.vsockets[i];
 
 		if (!strcmp(vsocket->path, path)) {
-			pthread_mutex_lock(&vsocket->conn_mutex);
-			for (conn = TAILQ_FIRST(&vsocket->conn_list);
-			     conn != NULL;
-			     conn = next) {
-				next = TAILQ_NEXT(conn, next);
-
-				/*
-				 * If r/wcb is executing, release vsocket's
-				 * conn_mutex and vhost_user's mutex locks, and
-				 * try again since the r/wcb may use the
-				 * conn_mutex and mutex locks.
-				 */
-				if (fdset_try_del(&vhost_user.fdset,
-						  conn->connfd) == -1) {
-					pthread_mutex_unlock(
-							&vsocket->conn_mutex);
-					pthread_mutex_unlock(&vhost_user.mutex);
-					goto again;
-				}
-
-				VHOST_LOG_CONFIG(INFO,
-					"free connfd = %d for device '%s'\n",
-					conn->connfd, path);
-				close(conn->connfd);
-				vhost_destroy_device(conn->vid);
-				TAILQ_REMOVE(&vsocket->conn_list, conn, next);
-				free(conn);
-			}
-			pthread_mutex_unlock(&vsocket->conn_mutex);
-
 			vsocket->trans_ops->socket_cleanup(vsocket);
 
-                        pthread_mutex_destroy(&vsocket->conn_mutex);
-			vhost_user_socket_mem_free(vsocket);
+			free(vsocket->path);
+			free(vsocket);
 
 			count = --vhost_user.vsocket_cnt;
 			vhost_user.vsockets[i] = vhost_user.vsockets[count];
