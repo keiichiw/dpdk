@@ -684,6 +684,7 @@ vhost_new_device(void)
 	dev->vid = i;
 	dev->flags = VIRTIO_DEV_BUILTIN_VIRTIO_NET;
 	dev->slave_req_fd = -1;
+	dev->trans_ops = &af_unix_trans_ops;
 	dev->postcopy_ufd = -1;
 	rte_spinlock_init(&dev->slave_req_lock);
 

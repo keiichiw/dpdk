@@ -21,6 +21,7 @@ sources = files(
         'fd_man.c',
         'iotlb.c',
         'socket.c',
+        'trans_af_unix.c',
         'vdpa.c',
         'vhost.c',
         'vhost_crypto.c',
