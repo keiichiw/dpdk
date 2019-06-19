@@ -423,7 +423,7 @@ rte_vhost_driver_register(const char *path, uint64_t flags)
 	} else {
 		vsocket->is_server = true;
 	}
-	ret = create_unix_socket(vsocket);
+	ret = trans_ops->socket_init(vsocket, flags);
 	if (ret < 0) {
 		goto out_mutex;
 	}
@@ -496,25 +496,9 @@ again:
 			}
 			pthread_mutex_unlock(&vsocket->conn_mutex);
 
-			if (vsocket->is_server) {
-				/*
-				 * If r/wcb is executing, release vhost_user's
-				 * mutex lock, and try again since the r/wcb
-				 * may use the mutex lock.
-				 */
-				if (fdset_try_del(&vhost_user.fdset,
-						vsocket->socket_fd) == -1) {
-					pthread_mutex_unlock(&vhost_user.mutex);
-					goto again;
-				}
+			vsocket->trans_ops->socket_cleanup(vsocket);
 
-				close(vsocket->socket_fd);
-				unlink(path);
-			} else if (vsocket->reconnect) {
-				vhost_user_remove_reconnect(vsocket);
-			}
-
-			pthread_mutex_destroy(&vsocket->conn_mutex);
+                        pthread_mutex_destroy(&vsocket->conn_mutex);
 			vhost_user_socket_mem_free(vsocket);
 
 			count = --vhost_user.vsocket_cnt;
