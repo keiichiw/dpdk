@@ -294,9 +294,6 @@ struct vhost_user {
 
 extern struct vhost_user vhost_user;
 
-int vhost_user_start_server(struct vhost_user_socket *vsocket);
-int vhost_user_start_client(struct vhost_user_socket *vsocket);
-
 extern pthread_t reconn_tid;
 
 int vhost_user_reconnect_init(void);
@@ -455,6 +452,19 @@ struct vhost_transport_ops {
 	 *  vhost socket
 	 */
 	void (*socket_cleanup)(struct vhost_user_socket *vsocket);
+
+	/**
+	 * Start establishing vhost-user connections.  This function is
+	 * asynchronous and connections may be established after it has
+	 * returned.  Call vhost_user_add_connection() to register new
+	 * connections.
+	 *
+	 * @param vsocket
+	 *  vhost socket
+	 * @return
+	 *  0 on success, -1 on failure
+	 */
+	int (*socket_start)(struct vhost_user_socket *vsocket);
 
 	/**
 	 * Notify the guest that used descriptors have been added to the vring.
