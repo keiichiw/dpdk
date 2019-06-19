@@ -91,8 +91,8 @@ static const char *vhost_message_str[VHOST_USER_MAX] = {
 	[VHOST_USER_GET_STATUS] = "VHOST_USER_GET_STATUS",
 };
 
-static int send_vhost_reply(int sockfd, struct VhostUserMsg *msg);
-static int read_vhost_message(int sockfd, struct VhostUserMsg *msg);
+static int send_vhost_reply(struct virtio_net *dev, struct VhostUserMsg *msg);
+int read_vhost_message(int sockfd, struct VhostUserMsg *msg);
 
 static void
 close_msg_fds(struct VhostUserMsg *msg)
@@ -1066,7 +1066,7 @@ vhost_user_postcopy_register(struct virtio_net *dev, int main_fd,
 
 	/* Send the addresses back to qemu */
 	msg->fd_num = 0;
-	send_vhost_reply(main_fd, msg);
+	send_vhost_reply(dev, msg);
 
 	/* Wait for qemu to acknolwedge it's got the addresses
 	 * we've got to wait before we're allowed to generate faults.
@@ -2599,53 +2599,8 @@ static vhost_message_handler_t vhost_message_handlers[VHOST_USER_MAX] = {
 	[VHOST_USER_GET_STATUS] = vhost_user_get_status,
 };
 
-/* return bytes# of read on success or negative val on failure. */
 static int
-read_vhost_message(int sockfd, struct VhostUserMsg *msg)
-{
-	int ret;
-
-	ret = read_fd_message(sockfd, (char *)msg, VHOST_USER_HDR_SIZE,
-		msg->fds, VHOST_MEMORY_MAX_NREGIONS, &msg->fd_num);
-	if (ret <= 0) {
-		return ret;
-	} else if (ret != VHOST_USER_HDR_SIZE) {
-		VHOST_LOG_CONFIG(ERR, "Unexpected header size read\n");
-		close_msg_fds(msg);
-		return -1;
-	}
-
-	if (msg->size) {
-		if (msg->size > sizeof(msg->payload)) {
-			VHOST_LOG_CONFIG(ERR,
-				"invalid msg size: %d\n", msg->size);
-			return -1;
-		}
-		ret = read(sockfd, &msg->payload, msg->size);
-		if (ret <= 0)
-			return ret;
-		if (ret != (int)msg->size) {
-			VHOST_LOG_CONFIG(ERR,
-				"read control message failed\n");
-			return -1;
-		}
-	}
-
-	return ret;
-}
-
-static int
-send_vhost_message(int sockfd, struct VhostUserMsg *msg)
-{
-	if (!msg)
-		return 0;
-
-	return send_fd_message(sockfd, (char *)msg,
-		VHOST_USER_HDR_SIZE + msg->size, msg->fds, msg->fd_num);
-}
-
-static int
-send_vhost_reply(int sockfd, struct VhostUserMsg *msg)
+send_vhost_reply(struct virtio_net *dev, struct VhostUserMsg *msg)
 {
 	if (!msg)
 		return 0;
@@ -2655,7 +2610,7 @@ send_vhost_reply(int sockfd, struct VhostUserMsg *msg)
 	msg->flags |= VHOST_USER_VERSION;
 	msg->flags |= VHOST_USER_REPLY_MASK;
 
-	return send_vhost_message(sockfd, msg);
+	return dev->trans_ops->send_reply(dev, msg);
 }
 
 static int
@@ -2666,7 +2621,7 @@ send_vhost_slave_message(struct virtio_net *dev, struct VhostUserMsg *msg)
 	if (msg->flags & VHOST_USER_NEED_REPLY)
 		rte_spinlock_lock(&dev->slave_req_lock);
 
-	ret = send_vhost_message(dev->slave_req_fd, msg);
+	ret = dev->trans_ops->send_slave_req(dev, msg);
 	if (ret < 0 && (msg->flags & VHOST_USER_NEED_REPLY))
 		rte_spinlock_unlock(&dev->slave_req_lock);
 
@@ -2747,10 +2702,10 @@ vhost_user_unlock_all_queue_pairs(struct virtio_net *dev)
 }
 
 int
-vhost_user_msg_handler(int vid, int fd)
+vhost_user_msg_handler(int vid, int fd, const struct VhostUserMsg *msg_)
 {
+	struct VhostUserMsg msg = *msg_; /* copy so we can build the reply */
 	struct virtio_net *dev;
-	struct VhostUserMsg msg;
 	struct rte_vdpa_device *vdpa_dev;
 	int ret;
 	int unlock_required = 0;
@@ -2772,19 +2727,12 @@ vhost_user_msg_handler(int vid, int fd)
 		}
 	}
 
-	ret = read_vhost_message(fd, &msg);
-	if (ret <= 0) {
-		if (ret < 0)
-			VHOST_LOG_CONFIG(ERR,
-				"vhost read message failed\n");
-		else
-			VHOST_LOG_CONFIG(INFO,
-				"vhost peer closed\n");
-
+	if (msg.request.master >= VHOST_USER_MAX) {
+		VHOST_LOG_CONFIG(ERR, "vhost read incorrect message\n");
 		return -1;
 	}
 
-	ret = 0;
+        ret = 0;
 	request = msg.request.master;
 	if (request > VHOST_USER_NONE && request < VHOST_USER_MAX &&
 			vhost_message_str[request]) {
@@ -2845,7 +2793,7 @@ vhost_user_msg_handler(int vid, int fd)
 				(void *)&msg);
 		switch (ret) {
 		case RTE_VHOST_MSG_RESULT_REPLY:
-			send_vhost_reply(fd, &msg);
+			send_vhost_reply(dev, &msg);
 			/* Fall-through */
 		case RTE_VHOST_MSG_RESULT_ERR:
 		case RTE_VHOST_MSG_RESULT_OK:
@@ -2879,7 +2827,7 @@ vhost_user_msg_handler(int vid, int fd)
 			VHOST_LOG_CONFIG(DEBUG,
 				"Processing %s succeeded and needs reply.\n",
 				vhost_message_str[request]);
-			send_vhost_reply(fd, &msg);
+			send_vhost_reply(dev, &msg);
 			handled = true;
 			break;
 		default:
@@ -2894,7 +2842,7 @@ skip_to_post_handle:
 				(void *)&msg);
 		switch (ret) {
 		case RTE_VHOST_MSG_RESULT_REPLY:
-			send_vhost_reply(fd, &msg);
+			send_vhost_reply(dev, &msg);
 			/* Fall-through */
 		case RTE_VHOST_MSG_RESULT_ERR:
 		case RTE_VHOST_MSG_RESULT_OK:
@@ -2925,7 +2873,7 @@ skip_to_post_handle:
 		msg.payload.u64 = ret == RTE_VHOST_MSG_RESULT_ERR;
 		msg.size = sizeof(msg.payload.u64);
 		msg.fd_num = 0;
-		send_vhost_reply(fd, &msg);
+		send_vhost_reply(dev, &msg);
 	} else if (ret == RTE_VHOST_MSG_RESULT_ERR) {
 		VHOST_LOG_CONFIG(ERR,
 			"vhost message handling failed.\n");
@@ -3025,8 +2973,9 @@ vhost_user_iotlb_miss(struct virtio_net *dev, uint64_t iova, uint8_t perm)
 		},
 	};
 
-	ret = send_vhost_message(dev->slave_req_fd, &msg);
-	if (ret < 0) {
+	ret = dev->trans_ops->send_slave_req(dev, &msg);
+
+        if (ret < 0) {
 		VHOST_LOG_CONFIG(ERR,
 				"Failed to send IOTLB miss message (%d)\n",
 				ret);
