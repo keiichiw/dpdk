@@ -160,6 +160,7 @@ typedef struct VhostUserMsg {
 
 
 /* vhost_user.c */
+int validate_msg_fds(struct VhostUserMsg *msg, int expected_fds);
 int vhost_user_msg_handler(int vid, int fd, const struct VhostUserMsg *msg);
 int vhost_user_iotlb_miss(struct virtio_net *dev, uint64_t iova, uint8_t perm);
 
