@@ -877,8 +877,10 @@ vhost_user_set_mem_table(struct virtio_net **pdev, struct VhostUserMsg *msg)
 
 	uint32_t i;
 
+	/*
 	if (validate_msg_fds(msg, memory->nregions) != 0)
 		return RTE_VHOST_MSG_RESULT_ERR;
+	*/
 
 	if (memory->nregions > VHOST_MEMORY_MAX_NREGIONS) {
 		VHOST_LOG_CONFIG(ERR,
@@ -1296,8 +1298,10 @@ vhost_user_set_vring_call(struct virtio_net **pdev, struct VhostUserMsg *msg)
 	int expected_fds;
 
 	expected_fds = (msg->payload.u64 & VHOST_USER_VRING_NOFD_MASK) ? 0 : 1;
+	/*
 	if (validate_msg_fds(msg, expected_fds) != 0)
 		return RTE_VHOST_MSG_RESULT_ERR;
+	*/
 
 	file.index = msg->payload.u64 & VHOST_USER_VRING_IDX_MASK;
 	if (msg->payload.u64 & VHOST_USER_VRING_NOFD_MASK)
@@ -1538,8 +1542,10 @@ vhost_user_set_vring_kick(struct virtio_net **pdev, struct VhostUserMsg *msg)
 	int expected_fds;
 
 	expected_fds = (msg->payload.u64 & VHOST_USER_VRING_NOFD_MASK) ? 0 : 1;
+	/*
 	if (validate_msg_fds(msg, expected_fds) != 0)
 		return RTE_VHOST_MSG_RESULT_ERR;
+	*/
 
 	file.index = msg->payload.u64 & VHOST_USER_VRING_IDX_MASK;
 	if (msg->payload.u64 & VHOST_USER_VRING_NOFD_MASK)
